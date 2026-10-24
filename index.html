@@ -248,6 +248,23 @@ textarea{min-height:64px;resize:vertical}
 .adv{margin-top:12px;border:1px solid var(--line);border-radius:10px;padding:2px 12px 12px}
 .adv summary{cursor:pointer;font-weight:700;font-size:14px;padding:10px 0 0;min-height:36px;list-style-position:inside}
 .adv[open] summary{margin-bottom:2px}
+/* first-run tour */
+.tour-block{position:fixed;inset:0;z-index:65}
+.tour-block.dim{background:rgba(0,0,0,.62)}
+.tour-hl{position:relative;z-index:30;border-radius:10px;box-shadow:0 0 0 3px var(--accent),0 0 0 9999px rgba(0,0,0,.62)!important}
+.tour{position:fixed;left:50%;transform:translateX(-50%);z-index:70;width:min(528px,calc(100% - 32px));background:var(--card);border:2px solid var(--ink);border-radius:12px;padding:14px 16px;box-shadow:0 12px 32px rgba(0,0,0,.5)}
+.tour.top{top:calc(16px + env(safe-area-inset-top,0px))}
+.tour.mid{top:50%;transform:translate(-50%,-50%)}
+.tour.bot{bottom:calc(var(--tabbar) + 28px + env(safe-area-inset-bottom,0px))}
+.tour h2{font-family:var(--f-display);font-stretch:80%;font-weight:850;font-size:22px;margin:2px 0 6px}
+.tour p{margin:0 0 8px;font-size:14.5px;color:var(--ink-2)}
+.tour ol{margin:4px 0 10px;padding-left:20px;font-size:14.5px;color:var(--ink-2)}
+.tour ol li{margin:3px 0}
+.tour-dots{display:flex;gap:5px}
+.tour-dots i{width:7px;height:7px;border-radius:50%;background:var(--line)}
+.tour-dots i.on{background:var(--ink)}
+.tour-foot{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap}
+.tour-foot .right{display:flex;gap:8px;margin-left:auto}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(var(--tabbar) + 24px + env(safe-area-inset-bottom,0px));z-index:60;
   background:var(--ink);color:var(--bg);padding:9px 16px;border-radius:999px;font-weight:650;font-size:14px;max-width:calc(100% - 32px);text-align:center}
 </style>
@@ -345,6 +362,7 @@ textarea{min-height:64px;resize:vertical}
         <input id="importIn" type="file" accept="application/json,.json" hidden>
       </div>
     </div>
+    <div class="section"><button class="btn small" data-act="tour">Show the quick tour again</button></div>
     <div class="section sub" style="padding:0 2px">All numbers here are estimates. Mifflin-St Jeor for BMR, the U.S. Navy tape formula for body fat, and 3,500 kcal per pound of fat.</div>
   </section>
 </main>
@@ -517,7 +535,7 @@ function saveSettingsSoon(){
 /* ---------- boot ---------- */
 function boot(){
   loadState(); canPhoto = !!AI.key; loaded.settings = loaded.weights = true;
-  bindStatic(); fillSettingsForm(); render();
+  bindStatic(); fillSettingsForm(); render(); maybeTour();
 }
 
 /* ---------- render ---------- */
@@ -1538,8 +1556,62 @@ async function readImport(file){
     S.settings = { ...DEFAULTS, ...(x.settings || {}), onboarded: true };
     S.meals = x.meals.map(m => ({ ...m, photoId: null })); S.weights = (x.weights || []).filter(w => w.date && w.lb); S.measures = x.measures || []; S.days = x.days || {};
     try { persist(); } catch (e) { toast(dbErr(e)); return; }
-    setupOpen = false; closeSheet(); if (S.settings.theme) applyTheme(S.settings.theme); fillSettingsForm(); render(); toast("Backup imported");
+    setupOpen = false; closeSheet(); if (S.settings.theme) applyTheme(S.settings.theme); fillSettingsForm(); render(); toast("Backup imported"); maybeTour();
   };
+}
+
+/* ---------- quick tour (first run) ---------- */
+const TOUR_KEY = "cutTracker.toured";
+let tourStep = -1;
+const TOUR = [
+  { target: "#v-today .label", place: "bot", title: "Your day at a glance",
+    body: `<p>This card shows calories eaten against your daily target, plus protein, carbs and fat.</p><p>The big number is how far under (or over) your burn you are today. Green means you're on track.</p>` },
+  { target: ".fab", place: "top", title: "Log a meal",
+    body: `<p>Tap <b>+ Meal</b> and take a photo of your plate. The app estimates the calories, and at Hard Knox or Gizmo it matches your food to the official menu.</p><p>Check the items, adjust servings if needed, then tap <b>Save meal</b>. No photo? Use <b>Add without photo</b> on Today.</p>` },
+  { target: null, place: "mid", title: "Turn on photo analysis", key: true,
+    body: `<p>Photo estimates need a free Google Gemini key. It takes about a minute:</p>
+      <ol><li>Tap <b>Open Google AI Studio</b> and sign in with your Google account.</li><li>Tap <b>Create API key</b>, then copy it.</li><li>Come back here and paste it below.</li></ol>
+      <a class="btn small" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;text-decoration:none">Open Google AI Studio</a>
+      <div class="field"><label for="tour-key">Your Gemini key</label><input id="tour-key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your key here"></div>
+      <div class="help sub" id="tour-key-help" style="margin-top:6px">Free. Your key stays on this phone.</div>` },
+  { target: '[data-tab="progress"]', place: "top", title: "Weigh in and see progress",
+    body: `<p>Log your weight under <b>Progress</b>, ideally in the morning. Your 7-day average and deficit trend build up there over time.</p><p>Your data is saved only on this phone, so download a backup now and then under <b>You → Export</b>.</p>` },
+];
+function maybeTour(){ if (!setupOpen && !needsSetup() && !ls.get(TOUR_KEY)) startTour(); }
+function startTour(){ closeSheet(); S.tab = "today"; ls.set("tab", "today"); render(); window.scrollTo(0, 0); showTour(0); }
+function endTour(){
+  tourStep = -1; ls.set(TOUR_KEY, "1");
+  document.querySelectorAll(".tour-hl").forEach(e => e.classList.remove("tour-hl"));
+  $("#tour")?.remove(); $("#tour-block")?.remove();
+}
+function showTour(i){
+  tourStep = i; const st = TOUR[i];
+  document.querySelectorAll(".tour-hl").forEach(e => e.classList.remove("tour-hl"));
+  $("#tour")?.remove(); $("#tour-block")?.remove();
+  const tgt = st.target ? $(st.target) : null;
+  if (tgt) { tgt.classList.add("tour-hl"); tgt.scrollIntoView({ block: "nearest" }); }
+  const blk = document.createElement("div"); blk.id = "tour-block"; blk.className = "tour-block" + (tgt ? "" : " dim"); document.body.appendChild(blk);
+  const last = i === TOUR.length - 1, hasKey = !!AI.key;
+  const card = document.createElement("div"); card.id = "tour"; card.className = "tour " + st.place; card.setAttribute("role", "dialog"); card.setAttribute("aria-label", st.title);
+  card.innerHTML = `<div class="tour-foot" style="margin-top:0"><span class="eyebrow">Quick tour · ${i + 1} of ${TOUR.length}</span><div class="tour-dots">${TOUR.map((_, k) => `<i class="${k === i ? "on" : ""}"></i>`).join("")}</div></div>
+    <h2>${st.title}</h2>${st.body}
+    <div class="tour-foot">${i === 0 ? `<button class="link" id="tour-skip">Skip tour</button>` : `<button class="link" id="tour-back">Back</button>`}
+      <div class="right">${st.key && !hasKey ? `<button class="btn small" id="tour-later">Later</button>` : ""}<button class="btn small primary" id="tour-next">${st.key ? (hasKey ? "Next" : "Save key") : last ? "Done" : "Next"}</button></div></div>`;
+  document.body.appendChild(card);
+  $("#tour-skip", card)?.addEventListener("click", endTour);
+  $("#tour-back", card)?.addEventListener("click", () => showTour(i - 1));
+  $("#tour-later", card)?.addEventListener("click", () => showTour(i + 1));
+  const ki = $("#tour-key", card), next = $("#tour-next", card);
+  if (ki) {
+    ki.value = AI.key || "";
+    if (hasKey) $("#tour-key-help", card).textContent = "Photo analysis is already on. You can change the key under You → Photo analysis.";
+    else next.disabled = true;
+    ki.addEventListener("input", () => { next.disabled = !ki.value.trim() && !AI.key; next.textContent = ki.value.trim() ? "Save key" : (AI.key ? "Next" : "Save key"); });
+  }
+  next.addEventListener("click", () => {
+    if (ki && ki.value.trim() && ki.value.trim() !== AI.key) { AI.key = ki.value.trim(); saveAI(); renderAI(); toast("Photo analysis is on"); }
+    last ? endTour() : showTour(i + 1);
+  });
 }
 
 /* ---------- first-run setup ---------- */
@@ -1614,7 +1686,7 @@ async function finishSetup(){
   try {
     persist();
     const t = todayStr(); await put("weights", t, { date: t, lb: Math.round(c.lb*10)/10 });
-    setupOpen = false; S.tab = "today"; ls.set("tab", "today"); fillSettingsForm(); render(); toast("You're all set");
+    setupOpen = false; S.tab = "today"; ls.set("tab", "today"); fillSettingsForm(); render(); toast("You're all set"); startTour();
   } catch (e) { btn.disabled = false; btn.textContent = "Start tracking"; say(dbErr(e)); }
 }
 
@@ -1640,6 +1712,7 @@ function bindStatic(){
     if (act === "goto-settings") { S.tab = "settings"; fillSettingsForm(); render(); return; }
     if (act === "csv") return exportCsv(el.dataset.kind);
     if (act === "backup") return exportBackup();
+    if (act === "tour") return startTour();
     if (act === "import") return $("#importIn").click();
     if (act === "setup-import") return $("#importIn").click();
     if (act === "goto-ai") { closeSheet(); S.tab = "settings"; ls.set("tab", "settings"); fillSettingsForm(); render(); setTimeout(() => $("#ai-sec")?.scrollIntoView({ block: "start" }), 30); return; }
