@@ -319,7 +319,8 @@ textarea{min-height:64px;resize:vertical}
         <div class="sub">Meal photos are estimated by Google's Gemini AI, using your own free API key. Get one in about a minute at <a class="link" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>, then paste it here.</div>
         <div class="field"><label for="ai-key">Gemini API key</label><input id="ai-key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your key"></div>
         <div class="field"><label for="ai-model">Model</label>
-          <select id="ai-model"><option value="gemini-flash-latest">Gemini Flash (latest, recommended)</option><option value="gemini-3.8-flash">Gemini 3.8 Flash</option><option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite (faster)</option></select></div>
+          <select id="ai-model"><option value="gemini-3.5-flash-lite">Fast: Gemini 3.5 Flash-Lite (recommended)</option><option value="gemini-flash-latest">More accurate: Gemini Flash (slower)</option></select>
+          <div class="help">Each estimate shows how long it took, so you can compare.</div></div>
         <div class="help sub" style="margin-top:8px">Your key stays on this phone and isn't included in backups. Photos you analyze are sent to Google. On the free tier, Google may use them to improve its products, and there's a daily limit.</div>
       </div>
     </div>
@@ -406,7 +407,7 @@ const DEFAULTS = { name:"", sex:"male", dob:"", heightIn:null, activity:1.375, d
 const S = { settings:{...DEFAULTS}, meals:[], weights:[], measures:[], days:{}, tab: ls.get("tab") || "today", range: ls.get("range") || "30" };
 let db = null, base = null, downloads = true, canPhoto = false, mode = "local";
 const STORE = "cutTracker.v1", PHOTO = "cutTracker.photo.", AIKEY = "cutTracker.ai";
-let AI = { key: "", model: "gemini-flash-latest" };
+let AI = { key: "", model: "gemini-3.5-flash-lite" };
 const loaded = { settings:false, weights:false };
 let setupOpen = false;
 
@@ -476,7 +477,7 @@ function persist(){
 }
 function loadState(){
   try { const d = JSON.parse(localStorage.getItem(STORE) || "null"); if (d) { S.settings = { ...DEFAULTS, ...(d.settings || {}) }; S.meals = d.meals || []; S.weights = d.weights || []; S.measures = d.measures || []; S.days = d.days || {}; } } catch {}
-  try { const a = JSON.parse(localStorage.getItem(AIKEY) || "null"); if (a) AI = { ...AI, ...a }; } catch {}
+  try { const a = JSON.parse(localStorage.getItem(AIKEY) || "null"); if (a) { AI = { ...AI, ...a }; if (!a.modelSet) AI.model = "gemini-3.5-flash-lite"; } } catch {}
   if (S.settings.theme) applyTheme(S.settings.theme);
 }
 function saveAI(){ try { localStorage.setItem(AIKEY, JSON.stringify(AI)); } catch {} canPhoto = !!AI.key; }
@@ -1373,19 +1374,35 @@ function sampleMsg(e){
   }
 }
 const blobB64 = blob => new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(String(r.result).split(",")[1]); r.onerror = no; r.readAsDataURL(blob); });
+async function shrink(blob, max){
+  const src = await createImageBitmap(blob), k = Math.min(1, max / Math.max(src.width, src.height));
+  if (k === 1) return blob;
+  const c = document.createElement("canvas"); c.width = Math.round(src.width*k); c.height = Math.round(src.height*k);
+  c.getContext("2d").drawImage(src, 0, 0, c.width, c.height);
+  return new Promise(r => c.toBlob(r, "image/jpeg", 0.8));
+}
+let lastAiMs = 0;
 async function geminiJson(prompt, blob, signal){
-  const body = { contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: "image/jpeg", data: await blobB64(blob) } }] }],
-    generationConfig: { responseMimeType: "application/json", temperature: 0.2 } };
-  let r;
-  try {
-    r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(AI.model || "gemini-flash-latest")}:generateContent`,
-      { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": AI.key }, body: JSON.stringify(body), signal });
-  } catch (e) { throw { code: e?.name === "AbortError" ? "cancelled" : "network" }; }
-  const j = await r.json().catch(() => ({}));
+  const t0 = performance.now();
+  const img = await blobB64(await shrink(blob, 768));
+  const model = AI.model || "gemini-3.5-flash-lite";
+  const send = async thinking => {
+    const generationConfig = { responseMimeType: "application/json", temperature: 0.2 };
+    if (thinking) generationConfig.thinkingConfig = { thinkingLevel: "minimal" };
+    try {
+      return await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+        { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": AI.key },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: "image/jpeg", data: img } }] }], generationConfig }), signal });
+    } catch (e) { throw { code: e?.name === "AbortError" ? "cancelled" : "network" }; }
+  };
+  // Ask for minimal thinking (much faster). Models that don't accept that setting get one plain retry.
+  let r = await send(AI.thinkingOk !== false), j = await r.json().catch(() => ({}));
+  if (r.status === 400 && /thinking/i.test(JSON.stringify(j.error || {}))) { AI.thinkingOk = false; saveAI(); r = await send(false); j = await r.json().catch(() => ({})); }
   if (!r.ok) {
     const msg = JSON.stringify(j.error || {});
     throw { code: r.status === 429 ? "rate_limited" : r.status === 404 ? "bad_model" : (r.status === 401 || r.status === 403 || /API_KEY|api key/i.test(msg)) ? "bad_key" : "error" };
   }
+  lastAiMs = performance.now() - t0;
   if (j.promptFeedback?.blockReason) throw { code: "refused" };
   const text = (j.candidates?.[0]?.content?.parts || []).map(p => p.text || "").join("").trim();
   if (!text) throw { code: "empty_completion" };
@@ -1413,7 +1430,7 @@ async function analyze(){
     ed.items = out;
     ed.confidence = ["low","medium","high"].includes(r.confidence) ? r.confidence : "medium";
     const matched = out.filter(i => i.menuId).length;
-    ed.aiNote = (items ? `${matched} of ${out.length} items matched to the ${CAFES[ed.place].name} ${curPart().label} menu. ` : "Estimated from the photo only. ") + String(r.notes ?? "").slice(0, 200);
+    ed.aiNote = (items ? `${matched} of ${out.length} items matched to the ${CAFES[ed.place].name} ${curPart().label} menu. ` : "Estimated from the photo only. ") + String(r.notes ?? "").slice(0, 200) + (lastAiMs ? ` (${(lastAiMs/1000).toFixed(1)} s)` : "");
   } catch (e) {
     if (ed !== mine || run !== runSeq) return;
     if (e?.code !== "cancelled") ed.error = sampleMsg(e);
@@ -1502,7 +1519,7 @@ async function exportBackup(){
 function renderAI(){
   const k = $("#ai-key"), m = $("#ai-model"); if (!k) return;
   if (document.activeElement !== k) k.value = AI.key || "";
-  m.value = [...m.options].some(o => o.value === AI.model) ? AI.model : "gemini-flash-latest";
+  m.value = [...m.options].some(o => o.value === AI.model) ? AI.model : "gemini-3.5-flash-lite";
   $("#ai-state").textContent = AI.key ? "On" : "Off";
 }
 /* ---------- import backup ---------- */
@@ -1666,7 +1683,7 @@ function bindStatic(){
   });
   $("#importIn").addEventListener("change", e => { const f = e.target.files?.[0]; e.target.value = ""; if (f) readImport(f); });
   $("#ai-key").addEventListener("input", e => { AI.key = e.target.value.trim(); saveAI(); renderAI(); });
-  $("#ai-model").addEventListener("change", e => { AI.model = e.target.value; saveAI(); });
+  $("#ai-model").addEventListener("change", e => { AI.model = e.target.value; AI.modelSet = true; delete AI.thinkingOk; saveAI(); });
   $("#v-settings").addEventListener("change", e => {
     if (!e.target.id?.startsWith("s-")) return;
     readSettingsForm(); saveSettingsSoon(); renderSettingsSummary();
